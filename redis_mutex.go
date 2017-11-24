@@ -60,7 +60,7 @@ func (m *RedisMutex) Lock() error {
 		}
 		time.Sleep(m.delay)
 	}
-	return nil
+	return ErrLockFail
 }
 
 // Unlock release locker
