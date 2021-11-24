@@ -4,15 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 )
 
 // ErrLockFail 获取redis锁失败
 var (
-	ErrLockFail = errors.New("redis lock fail")
-	scriptSHA1  string
-	client      Client
+	ErrLockFail       = errors.New("redis lock fail")
+	ErrNotObtained    = errors.New("redis lock: not obtained")
+	scriptSHA1Delete  string
+	scriptSHA1Refresh string
+	client            Client
 )
 
 const deleteScript = `
@@ -20,6 +23,14 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
 	return redis.call("del", KEYS[1])
 else
 	return 0
+end
+`
+
+const refreshScript = `
+if redis.call("get", KEYS[1]) == ARGV[1] then 
+	return redis.call("pexpire", KEYS[1], ARGV[2]) 
+else 
+	return 0 
 end
 `
 
@@ -73,19 +84,19 @@ func (m *RedisMutex) Lock() error {
 func (m *RedisMutex) Unlock() error {
 	m.locker.Lock()
 	defer m.locker.Unlock()
-	if len(scriptSHA1) == 0 {
+	if len(scriptSHA1Delete) == 0 {
 		//load delete lua script and redis will cache it
-		sha1, err := m.loadDeleteScript()
+		sha1, err := m.loadScript(deleteScript)
 		if err != nil {
 			return err
 		}
-		scriptSHA1 = sha1
+		scriptSHA1Delete = sha1
 	}
-	v, err := client.EvalSha(scriptSHA1, []string{m.name}, m.value)
+	v, err := client.EvalSha(scriptSHA1Delete, []string{m.name}, m.value)
 	if err != nil {
 		//retry
 		time.Sleep(10 * time.Millisecond)
-		v, err = client.EvalSha(scriptSHA1, []string{m.name}, m.value)
+		v, err = client.EvalSha(scriptSHA1Delete, []string{m.name}, m.value)
 	}
 	if err != nil {
 		return err
@@ -99,12 +110,48 @@ func (m *RedisMutex) Unlock() error {
 	return errors.New(msg)
 }
 
-func (m *RedisMutex) loadDeleteScript() (string, error) {
-	sha1, err := client.ScriptLoad(deleteScript)
+// Refresh locker ttl
+// 刷新ttl 使用lua脚本
+// if redis.call("get", KEYS[1]) == ARGV[1] then
+// return redis.call("pexpire", KEYS[1], ARGV[2])
+// else
+// return 0
+// end
+func (m *RedisMutex) Refresh() error {
+	ttlVal := strconv.FormatInt(int64(m.expire/time.Millisecond), 10)
+	m.locker.Lock()
+	defer m.locker.Unlock()
+	if len(scriptSHA1Refresh) == 0 {
+		//load refresh lua script and redis will cache it
+		sha1, err := m.loadScript(refreshScript)
+		if err != nil {
+			return err
+		}
+		scriptSHA1Refresh = sha1
+	}
+	v, err := client.EvalSha(scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
 	if err != nil {
 		//retry
 		time.Sleep(10 * time.Millisecond)
-		return client.ScriptLoad(deleteScript)
+		v, err = client.EvalSha(scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
+	}
+	if err != nil {
+		return err
+	}
+	//check return result
+	cnt, ok := v.(int64)
+	if ok && cnt == 1 {
+		return nil
+	}
+	return ErrNotObtained
+}
+
+func (m *RedisMutex) loadScript(script string) (string, error) {
+	sha1, err := client.ScriptLoad(script)
+	if err != nil {
+		//retry
+		time.Sleep(10 * time.Millisecond)
+		return client.ScriptLoad(script)
 	}
 	return sha1, err
 }
