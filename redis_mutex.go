@@ -117,8 +117,8 @@ func (m *RedisMutex) Unlock() error {
 // else
 // return 0
 // end
-func (m *RedisMutex) Refresh(ttl time.Duration) error {
-	ttlVal := strconv.FormatInt(int64(ttl/time.Millisecond), 10)
+func (m *RedisMutex) Refresh() error {
+	ttlVal := strconv.FormatInt(int64(m.expire/time.Millisecond), 10)
 	m.locker.Lock()
 	defer m.locker.Unlock()
 	if len(scriptSHA1Refresh) == 0 {
