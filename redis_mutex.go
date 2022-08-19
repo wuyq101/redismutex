@@ -1,6 +1,7 @@
 package redismutex
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -36,9 +37,9 @@ end
 
 // Client redis 客户端接口
 type Client interface {
-	SetNX(key, value string, expire time.Duration) (bool, error)
-	ScriptLoad(script string) (string, error)
-	EvalSha(sha1 string, keys []string, args ...interface{}) (interface{}, error)
+	SetNX(ctx context.Context, key, value string, expire time.Duration) (bool, error)
+	ScriptLoad(ctx context.Context, script string) (string, error)
+	EvalSha(ctx context.Context, sha1 string, keys []string, args ...interface{}) (interface{}, error)
 }
 
 // RedisMutex 利用redis来做简易的分布式锁
@@ -57,6 +58,7 @@ type RedisMutex struct {
 	expire time.Duration
 	delay  time.Duration
 	retry  int
+	ctx    context.Context
 }
 
 // Lock obtain locker
@@ -65,7 +67,7 @@ func (m *RedisMutex) Lock() error {
 	m.locker.Lock()
 	defer m.locker.Unlock()
 	for i := 0; i < m.retry; i++ {
-		ok, err := client.SetNX(m.name, m.value, m.expire)
+		ok, err := client.SetNX(m.ctx, m.name, m.value, m.expire)
 		if ok && err == nil {
 			return nil
 		}
@@ -92,11 +94,11 @@ func (m *RedisMutex) Unlock() error {
 		}
 		scriptSHA1Delete = sha1
 	}
-	v, err := client.EvalSha(scriptSHA1Delete, []string{m.name}, m.value)
+	v, err := client.EvalSha(m.ctx, scriptSHA1Delete, []string{m.name}, m.value)
 	if err != nil {
 		//retry
 		time.Sleep(10 * time.Millisecond)
-		v, err = client.EvalSha(scriptSHA1Delete, []string{m.name}, m.value)
+		v, err = client.EvalSha(m.ctx, scriptSHA1Delete, []string{m.name}, m.value)
 	}
 	if err != nil {
 		return err
@@ -129,11 +131,11 @@ func (m *RedisMutex) Refresh() error {
 		}
 		scriptSHA1Refresh = sha1
 	}
-	v, err := client.EvalSha(scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
+	v, err := client.EvalSha(m.ctx, scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
 	if err != nil {
 		//retry
 		time.Sleep(10 * time.Millisecond)
-		v, err = client.EvalSha(scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
+		v, err = client.EvalSha(m.ctx, scriptSHA1Refresh, []string{m.name}, m.value, ttlVal)
 	}
 	if err != nil {
 		return err
@@ -147,28 +149,38 @@ func (m *RedisMutex) Refresh() error {
 }
 
 func (m *RedisMutex) loadScript(script string) (string, error) {
-	sha1, err := client.ScriptLoad(script)
+	sha1, err := client.ScriptLoad(m.ctx, script)
 	if err != nil {
 		//retry
 		time.Sleep(10 * time.Millisecond)
-		return client.ScriptLoad(script)
+		return client.ScriptLoad(m.ctx, script)
 	}
 	return sha1, err
 }
 
 // RedisLock 获取一个锁，并调用加锁方法
 func RedisLock(name string) (*RedisMutex, error) {
+	return RedisLockWithContext(context.Background(), name)
+}
+
+// RedisLockWithContext 获取一个锁，并调用加锁方法
+func RedisLockWithContext(ctx context.Context, name string) (*RedisMutex, error) {
 	m := &RedisMutex{
 		name:   name,
 		value:  randomString(32),
 		expire: 8 * time.Second,
 		retry:  32,
 		delay:  500 * time.Millisecond,
+		ctx:    ctx,
 	}
 	return m, m.Lock()
 }
 
-// NewRedisMutex 获取一个新的redis锁对象
+func NewRedisMutex(name string, expire time.Duration, retry int, delay time.Duration) *RedisMutex {
+	return NewRedisMutexWithContext(context.Background(), name, expire, retry, delay)
+}
+
+// NewRedisMutexWithContext 获取一个新的redis锁对象
 // name 要锁住的资源名称
 // 过期时间设置说明
 // expire 表示超时时间
@@ -179,13 +191,14 @@ func RedisLock(name string) (*RedisMutex, error) {
 // NOTE 另外expire时间请设置的稍微长一点，如果任务执行时间过长，超过了expire时间，那么这个锁可能已经过期被释放了
 // 默认锁的过期时间 8秒， 重试32次，每次间隔 500毫秒，这样重试总时间是16s
 // 这里的expire time只能预估，对执行很久的任务，请使用其他的方式，或者避免用锁
-func NewRedisMutex(name string, expire time.Duration, retry int, delay time.Duration) *RedisMutex {
+func NewRedisMutexWithContext(ctx context.Context, name string, expire time.Duration, retry int, delay time.Duration) *RedisMutex {
 	return &RedisMutex{
 		name:   name,
 		value:  randomString(32),
 		expire: expire,
 		retry:  retry,
 		delay:  delay,
+		ctx:    ctx,
 	}
 }
 
